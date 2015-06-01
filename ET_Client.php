@@ -6,22 +6,36 @@ class ET_Client extends SoapClient {
 	public $packageName, $packageFolders, $parentFolders;
 	private $wsdlLoc, $debugSOAP, $lastHTTPCode, $clientId, 
 			$clientSecret, $appsignature, $endpoint, 
-			$tenantTokens, $tenantKey;
+			$tenantTokens, $tenantKey, $xmlLoc,
+            $proxyHost, $proxyPort, $proxyLogin, $proxyPassword
+    ;
 		
 	function __construct($getWSDL = false, $debug = false, $params = null) {	
 		$tenantTokens = array();
-		$config = @include 'config.php';
+		$config = false;
+
+		$this->xmlLoc = 'ExactTargetWSDL.xml';
+
+		if (file_exists(realpath(__DIR__ . "/config.php")))
+			$config = include 'config.php';
+
 		if ($config){
 			$this->wsdlLoc = $config['defaultwsdl'];
 			$this->clientId = $config['clientid'];
 			$this->clientSecret = $config['clientsecret'];
 			$this->appsignature = $config['appsignature'];
+			if (array_key_exists('xmlloc', $config)){$this->xmlLoc = $config['xmlloc'];}
 		} else {
 			if ($params && array_key_exists('defaultwsdl', $params)){$this->wsdlLoc = $params['defaultwsdl'];}
 			else {$this->wsdlLoc = "https://webservice.exacttarget.com/etframework.wsdl";}
 			if ($params && array_key_exists('clientid', $params)){$this->clientId = $params['clientid'];}
 			if ($params && array_key_exists('clientsecret', $params)){$this->clientSecret = $params['clientsecret'];}
 			if ($params && array_key_exists('appsignature', $params)){$this->appsignature = $params['appsignature'];}
+			if ($params && array_key_exists('xmlloc', $params)){$this->xmlLoc = $params['xmlloc'];}
+            if ($params && array_key_exists('proxyhost', $params)){$this->proxyHost = $params['proxyhost'];}
+            if ($params && array_key_exists('proxyport', $params)){$this->proxyPort = $params['proxyport'];}
+            if ($params && array_key_exists('proxylogin', $params)) {$this->proxyLogin = $params['proxylogin'];}
+            if ($params && array_key_exists('proxypassword', $params)) {$this->proxyPassword = $params['proxypassword'];}
 		}
 		
 		$this->debugSOAP = $debug;
@@ -50,21 +64,38 @@ class ET_Client extends SoapClient {
 			$url = "https://www.exacttargetapis.com/platform/v1/endpoints/soap?access_token=".$this->getAuthToken($this->tenantKey);
 			$endpointResponse = restGet($url);			
 			$endpointObject = json_decode($endpointResponse->body);			
-			if ($endpointResponse && property_exists($endpointObject,"url")){		
+			if ($endpointObject && property_exists($endpointObject,"url")){
 				$this->endpoint = $endpointObject->url;			
 			} else {
 				throw new Exception('Unable to determine stack using /platform/v1/endpoints/:'.$endpointResponse->body);			
 			}
 			} catch (Exception $e) {
 			throw new Exception('Unable to determine stack using /platform/v1/endpoints/: '.$e->getMessage());
-		} 		
-		parent::__construct($this->LocalWsdlPath(), array('trace'=>1, 'exceptions'=>0));
+		}
+        $soapOptions = array(
+            'trace'=>1,
+            'exceptions'=>0,
+            'connection_timeout'=>120,
+        );
+        if (!empty($this->proxyHost)) {
+            $soapOptions['proxy_host'] = $this->proxyHost;
+        }
+        if (!empty($this->proxyPort)) {
+            $soapOptions['proxy_port'] = $this->proxyPort;
+        }
+        if (!empty($this->proxyLogin)) {
+            $soapOptions['proxy_login'] = $this->proxyLogin;
+        }
+        if (!empty($this->proxyPassword)) {
+            $soapOptions['proxy_password'] = $this->proxyPassword;
+        }
+		parent::__construct($this->xmlLoc, $soapOptions);
 		parent::__setLocation($this->endpoint);
 	}
 	
 	function refreshToken($forceRefresh = false) {
 		if (property_exists($this, "sdl") && $this->sdl == 0){
-			parent::__construct($this->LocalWsdlPath(), array('trace'=>1, 'exceptions'=>0));	
+			parent::__construct($this->xmlLoc, array('trace'=>1, 'exceptions'=>0));	
 		}
 		try {
 			$currentTime = new DateTime();
@@ -119,8 +150,8 @@ class ET_Client extends SoapClient {
 			
 			$remoteTS = $this->GetLastModifiedDate($wsdlLoc);
 			
-			if (file_exists($this->LocalWsdlPath())){
-				$localTS = filemtime($this->LocalWsdlPath());
+			if (file_exists($this->xmlLoc)){
+				$localTS = filemtime($this->xmlLoc);
 				if ($remoteTS <= $localTS) 
 				{
 					$getNewWSDL = false;
@@ -128,34 +159,13 @@ class ET_Client extends SoapClient {
 			}
 			
 			if ($getNewWSDL){
-				$newWSDL = file_get_contents($wsdlLoc);
-				file_put_contents($this->LocalWsdlPath(), $newWSDL);
+				$newWSDL = file_gET_contents($wsdlLoc);
+				file_put_contents($this->xmlLoc, $newWSDL);
 			}	
 		}
 		catch (Exception $e) {
 			throw new Exception('Unable to store local copy of WSDL file'."\n");
 		}
-	}
-	
-	function LocalWsdlPath()
-	{
-		$wsdlName = 'ExactTargetWSDL.xml';
-		$tmpPath = '';
-		
-		// if open_basedir is set then we cannot trust sys_get_temp_dir()
-		// see http://php.net/manual/en/function.sys-get-temp-dir.php#97044
-		if ('' === ini_get('open_basedir')) {
-			$tmpPath = sys_get_temp_dir();
-			
-			// sys_get_temp_dir() does not return a trailing slash on all OS's
-			// see http://php.net/manual/en/function.sys-get-temp-dir.php#80690
-			if ('/' !== substr($tmpPath, -1)) {
-				$tmpPath .= '/';
-			}
-		}
-		
-		return "{$tmpPath}{$wsdlName}";
-		
 	}
 	
 	function GetLastModifiedDate($remotepath) {
@@ -164,16 +174,26 @@ class ET_Client extends SoapClient {
 		curl_setopt($curl, CURLOPT_NOBODY, true);
 		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
 		curl_setopt($curl, CURLOPT_FILETIME, true);
+        if (!empty($this->proxyHost)) {
+            curl_setopt($curl, CURLOPT_PROXY, $this->proxyHost);
+        }
+        if (!empty($this->proxyPort)) {
+            curl_setopt($curl, CURLOPT_PROXYPORT, $this->proxyPort);
+        }
+        if (!empty($this->proxyLogin) && !empty($this->proxyPassword)) {
+            curl_setopt($curl, CURLOPT_PROXYAUTH, CURLAUTH_BASIC);
+            curl_setopt($curl, CURLOPT_PROXYUSERPWD, $this->proxyLogin.':'.$this->proxyPassword);
+        }
 		$result = curl_exec($curl);
 		
 		if ($result === false) {
-			die (curl_error($curl)); 
+			throw new Exception(curl_error($curl)); 
 		}
 		
 		return curl_getinfo($curl, CURLINFO_FILETIME);
 	}
 				
-	function __doRequest($request, $location, $saction, $version, $one_way=null) {
+	function __doRequest($request, $location, $saction, $version, $one_way = 0) {
 		$doc = new DOMDocument();
 		$doc->loadXML($request);
 		
@@ -181,7 +201,7 @@ class ET_Client extends SoapClient {
 		$objWSSE->addUserToken("*", "*", FALSE);
 		$objWSSE->addOAuth($this->getInternalAuthToken($this->tenantKey));
 				
-		$content = utf8_encode($objWSSE->saveXML());
+		$content = $objWSSE->saveXML();
 		$content_length = strlen($content); 
 		if ($this->debugSOAP){
 			error_log ('FuelSDK SOAP Request: ');
@@ -1633,18 +1653,15 @@ class ET_List_Subscriber extends ET_GetSupport {
 }
 
 class ET_TriggeredSend extends ET_CUDSupport {
-	public  $subscribers, $folderId, $client;
+	public  $subscribers, $folderId;
 	function __construct() {	
 		$this->obj = "TriggeredSendDefinition";
 		$this->folderProperty = "CategoryID";
 		$this->folderMediaType = "triggered_send";
 	}
 	
-	public function Send( $clientMID = null ) {
+	public function Send() {
 		$tscall = array("TriggeredSendDefinition" => $this->props , "Subscribers" => $this->subscribers);
-		if( !empty( $clientMID ) && "string" == gettype( $clientMID ) ) {
-			$tscall["Client"] = array( "ID" => $clientMID );
-		}
 		$response = new ET_Post($this->authStub, "TriggeredSend", $tscall);
 		return $response;
 	}
@@ -1705,6 +1722,12 @@ class ET_Organization extends ET_CUDSupport {
 class ET_User extends ET_CUDSupport {
 	function __construct() {
 		$this->obj = "AccountUser";
+	}
+}
+
+class ET_Send extends ET_CUDSupport {
+	function __construct() {
+		$this->obj = "Send";
 	}
 }
 
